@@ -72,6 +72,16 @@ def run_step(name: str, fn: Callable[[], None]) -> StepResult:
         # keep going
         return StepResult(name=name, ok=False, detail=str(e))
 
+def list_dir(dir_path: Path, pattern: str = "*") -> None:
+    if not dir_path.exists():
+        log(f"Folder missing: {dir_path.resolve()}")
+        return
+    items = sorted(dir_path.glob(pattern))
+    log(f"{dir_path.resolve()} -> {len(items)} files")
+    for fp in items[:15]:
+        log(f"  - {fp.name}")
+    if len(items) > 15:
+        log("  ...")
 
 # =========================
 # SECTION 1: LVCVA fetch
@@ -95,6 +105,9 @@ def download(url: str, out_path: Path) -> None:
 def step_fetch_lvcva() -> None:
     download(HIST_URL, LVCVA_DIR / "lvcva_historical_1970_2024.pdf")
     download(EXEC_URL, LVCVA_DIR / "lvcva_exec_summary_dec2025.pdf")
+def _extract_text(pdf_path: Path) -> str:
+        with pdfplumber.open(pdf_path) as pdf:
+            return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
 # =========================
@@ -107,6 +120,10 @@ def step_parse_airport() -> None:
     pdfs = sorted(AIRPORT_DIR.glob("*.pdf"))
     if not pdfs:
         log(f"No airport PDFs found in: {AIRPORT_DIR.resolve()} — skipping.")
+        list_dir(GAMING_DIR)
+        list_dir(HOTEL_DIR)
+        list_dir(CONVENTION_DIR)
+
         return
 
     rows = []
@@ -153,10 +170,7 @@ def step_parse_airport() -> None:
     log(df.groupby("year")["total_passengers"].agg(["count", "min", "max"]).to_string())
 
 
-    def _extract_text(pdf_path: Path) -> str:
-        with pdfplumber.open(pdf_path) as pdf:
-            return "\n".join(page.extract_text() or "" for page in pdf.pages)
-
+    
 
 import re
 from pathlib import Path
@@ -225,6 +239,29 @@ def parse_enplaned_deplaned_dual(pdf_path: Path) -> list[dict] | None:
     }
 
     return [rec_new, rec_prev]
+def step_airport_yearly_totals() -> None:
+    in_csv = CLEAN_DIR / "airport_monthly_passengers.csv"
+    if not in_csv.exists():
+        log(f"Missing {in_csv.resolve()} — run the airport parse step first.")
+        return
+
+    df = pd.read_csv(in_csv, parse_dates=["date"])
+    yearly = (
+        df.groupby("year", as_index=False)
+          .agg(
+              total_passengers=("total_passengers", "sum"),
+              months=("month", "nunique"),
+          )
+          .sort_values("year")
+    )
+
+    out_csv = CLEAN_DIR / "airport_yearly_passengers.csv"
+    yearly.to_csv(out_csv, index=False)
+
+    log(f"Wrote: {out_csv.resolve()}")
+    log("Airport yearly totals (sanity):")
+    log(yearly.tail(10).to_string(index=False))
+
 # =========================
 # SECTION 3: Gaming (placeholder loader)
 # =========================
@@ -233,13 +270,22 @@ def step_parse_gaming() -> None:
     Put your Nevada Gaming Control Board exports in data/raw/gaming/.
     This step will ingest CSV/XLSX automatically and create a cleaned CSV.
     """
-    files = sorted([*GAMING_DIR.glob("*.csv"), *GAMING_DIR.glob("*.xlsx")])
+    files = sorted([*GAMING_DIR.glob("*.csv"), *GAMING_DIR.glob("*.xlsx"), *GAMING_DIR.glob("*.pdf")])
+
     if not files:
         log(f"No gaming CSV/XLSX found in: {GAMING_DIR.resolve()}")
+        list_dir(GAMING_DIR)
+        list_dir(HOTEL_DIR)
+        list_dir(CONVENTION_DIR)
+
         return
 
     dfs = []
     for fp in files:
+        if fp.suffix.lower() == ".pdf":
+            log(f"  - Found gaming PDF (not parsed yet): {fp.name}")
+            continue
+
         try:
             if fp.suffix.lower() == ".csv":
                 df = pd.read_csv(fp)
@@ -268,6 +314,10 @@ def step_parse_hotels() -> None:
     files = sorted([*HOTEL_DIR.glob("*.csv"), *HOTEL_DIR.glob("*.xlsx")])
     if not files:
         log(f"No hotel CSV/XLSX found in: {HOTEL_DIR.resolve()}")
+        list_dir(GAMING_DIR)
+        list_dir(HOTEL_DIR)
+        list_dir(CONVENTION_DIR)
+
         return
     # Same approach as gaming (ingest, combine, later we standardize columns)
     dfs = []
@@ -291,7 +341,7 @@ def step_parse_hotels() -> None:
 def step_scan_lvcva_conventions() -> None:
     """
     Scans any lvcva*.pdf in data/raw/lvcva and writes out lines that mention 'convention'.
-    This is a tuning step (non-crashing) so we can build an exact parser next.
+    Self-contained: does not rely on _extract_text.
     """
     out_dir = CLEAN_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -299,15 +349,22 @@ def step_scan_lvcva_conventions() -> None:
     pdfs = sorted(LVCVA_DIR.glob("lvcva*.pdf"))
     if not pdfs:
         log(f"No lvcva*.pdf found in: {LVCVA_DIR.resolve()} — skipping.")
+        list_dir(GAMING_DIR)
+        list_dir(HOTEL_DIR)
+        list_dir(CONVENTION_DIR)
+
         return
 
     debug_lines = []
     for pdf in pdfs:
         try:
-            text = _extract_text(pdf)
+            with pdfplumber.open(pdf) as p:
+                text = "\n".join(page.extract_text() or "" for page in p.pages)
+
             hits = [ln.strip() for ln in text.splitlines() if "convention" in ln.lower()]
             debug_lines.append(f"\n--- {pdf.name} ---")
-            debug_lines.extend(hits[:80])  # cap so it doesn't explode
+            debug_lines.extend(hits[:150])  # cap output
+
         except Exception as e:
             log(f"  [error] reading {pdf.name}: {e}")
 
@@ -319,6 +376,10 @@ def step_parse_conventions() -> None:
     files = sorted([*CONVENTION_DIR.glob("*.csv"), *CONVENTION_DIR.glob("*.xlsx")])
     if not files:
         log(f"No convention CSV/XLSX found in: {CONVENTION_DIR.resolve()}")
+        list_dir(GAMING_DIR)
+        list_dir(HOTEL_DIR)
+        list_dir(CONVENTION_DIR)
+
         return
     dfs = []
     for fp in files:
@@ -350,6 +411,8 @@ def main():
     results.append(run_step("Scan LVCVA PDFs for convention metrics (debug)", step_scan_lvcva_conventions))
 
     results.append(run_step("Parse Airport monthly totals (Traffic Summary PDFs)", step_parse_airport))
+    results.append(run_step("Build Airport yearly totals (from monthly)", step_airport_yearly_totals))
+
     results.append(run_step("Ingest Gaming exports (CSV/XLSX)", step_parse_gaming))
     results.append(run_step("Ingest Hotel stats (CSV/XLSX)", step_parse_hotels))
     results.append(run_step("Ingest Convention stats (CSV/XLSX)", step_parse_conventions))
