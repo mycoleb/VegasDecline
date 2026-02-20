@@ -10,6 +10,7 @@ YTD_XLSX = Path("data/Year_to_Date_Summary_for_2025_a3eca74d-4e08-4cef-9aac-9c22
 
 
 def parse_historical_visitors_from_pdf(pdf_path: Path) -> pd.DataFrame:
+    print("parsing historical visitors from pdf")
     with pdfplumber.open(pdf_path) as pdf:
         text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
